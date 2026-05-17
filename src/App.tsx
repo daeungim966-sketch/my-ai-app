@@ -1,11 +1,15 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { MousePointer2, Pencil, Trash2, RotateCcw, Copy, Info, MousePointer, Ruler } from 'lucide-react';
+import { ArrowLeft, ClipboardPaste, Copy, Info, Minus, MousePointer, MousePointer2, Pencil, Plus, RotateCcw, Ruler, Scissors, Trash2 } from 'lucide-react';
 
 interface Point {
   x: number;
   y: number;
 }
+
+type Mode = 'draw' | 'select' | 'cut';
+type ActivityId = 'activity1' | 'activity2';
+type CutLine = { start: Point; end: Point };
 
 interface Shape {
   id: string;
@@ -16,17 +20,119 @@ interface Shape {
   type: 'triangle' | 'trapezoid' | 'parallelogram' | 'piece';
 }
 
+interface ActivityConfig {
+  id: ActivityId;
+  title: string;
+  subtitle: string;
+  cardDescription: string;
+  guideTitle: string;
+  guideSteps: string[];
+}
+
+interface WorkspaceSnapshot {
+  mode: Mode;
+  shapes: Shape[];
+  history: Shape[][];
+  selectedId: string | null;
+  cutLine: CutLine | null;
+  isCutLineSelected: boolean;
+  showRuler: boolean;
+  rulerPos: Point;
+  rulerRot: number;
+  rulerLength: number;
+  showGuide: boolean;
+}
+
+interface ContextMenuState {
+  x: number;
+  y: number;
+  workspacePoint: Point;
+  targetShapeId: string | null;
+}
+
 const COLORS = [
   '#FF6B6B', '#FF9248', '#FFCC33', '#6BCB77', '#4D96FF', '#9B72AA',
   '#F06292', '#BA68C8', '#4DB6AC', '#AED581', '#FFD54F', '#FF8A65'
 ];
 
 const GRID_SIZE = 30;
+const RULER_EDGE_SNAP_DISTANCE = 14;
+const RULER_VERTEX_SNAP_DISTANCE = 20;
+const DEFAULT_RULER_LENGTH = 15;
+const MIN_RULER_LENGTH = 4;
+const MAX_RULER_LENGTH = 30;
+const DEFAULT_TOAST = '새로운 삼각형 완성! ✨';
+
+const ACTIVITY_CONFIGS: Record<ActivityId, ActivityConfig> = {
+  activity1: {
+    id: 'activity1',
+    title: '탐구 활동 1',
+    subtitle: '삼각형을 복사하여 넓이 구해보기',
+    cardDescription: '삼각형을 복제하여 붙이면 어떤 도형이 나오는지 탐구해 봅시다.',
+    guideTitle: '활동 1 안내',
+    guideSteps: [
+      '삼각형을 그리고 복사, 붙여넣기로 여러 개를 이어 붙여보세요.',
+      '복제하여 만든 모양을 캡처해 페들렛에 올려봅시다.',
+      '삼각형의 넓이를 어떻게 구할 수 있을지 친구와 이야기해 봅시다.'
+    ]
+  },
+  activity2: {
+    id: 'activity2',
+    title: '탐구 활동 2',
+    subtitle: '삼각형을 잘라서 넓이 구해보기',
+    cardDescription: '삼각형을 잘라서 어떤 도형이 나오는지 탐구해 봅시다.',
+    guideTitle: '활동 2 안내',
+    guideSteps: [
+      '삼각형을 그린 후 자르기 도구로 점선을 긋고 Enter를 눌러주세요.',
+      '잘라서 만든 모양을 캡처해 페들렛에 올려봅시다.',
+      '삼각형의 넓이를 어떻게 구할 수 있을지 친구와 이야기해 봅시다.'
+    ]
+  }
+};
+
+const createId = () => Math.random().toString(36).slice(2, 11);
+
+const getDistance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
+
+const getClosestPointOnSegment = (point: Point, start: Point, end: Point): Point => {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSquared = dx * dx + dy * dy;
+
+  if (lengthSquared === 0) return start;
+
+  const t = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared));
+  return {
+    x: start.x + t * dx,
+    y: start.y + t * dy
+  };
+};
+
+const createDefaultWorkspace = (): WorkspaceSnapshot => ({
+  mode: 'select',
+  shapes: [],
+  history: [],
+  selectedId: null,
+  cutLine: null,
+  isCutLineSelected: false,
+  showRuler: false,
+  rulerPos: { x: 100, y: 100 },
+  rulerRot: 0,
+  rulerLength: DEFAULT_RULER_LENGTH,
+  showGuide: true
+});
 
 export default function App() {
-  const [mode, setMode] = useState<'draw' | 'select' | 'cut'>('select');
+  const [currentActivity, setCurrentActivity] = useState<ActivityId | null>(null);
+  const [activityStates, setActivityStates] = useState<Record<ActivityId, WorkspaceSnapshot>>({
+    activity1: createDefaultWorkspace(),
+    activity2: createDefaultWorkspace()
+  });
+  const [mode, setMode] = useState<Mode>('select');
   const [shapes, setShapes] = useState<Shape[]>([]);
   const [history, setHistory] = useState<Shape[][]>([]);
+  const [copiedShape, setCopiedShape] = useState<Shape | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
   const addToHistory = useCallback(() => {
     setHistory(prev => {
@@ -47,7 +153,7 @@ export default function App() {
     setTimeout(() => setShowSuccessToast(false), 2000);
   }, [history]);
   const [drawingPath, setDrawingPath] = useState<Point[]>([]);
-  const [cutLine, setCutLine] = useState<{ start: Point; end: Point } | null>(null);
+  const [cutLine, setCutLine] = useState<CutLine | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [mouseDownPos, setMouseDownPos] = useState<Point | null>(null);
   const [hasStartedDragging, setHasStartedDragging] = useState(false);
@@ -58,15 +164,160 @@ export default function App() {
   const [isCutLineSelected, setIsCutLineSelected] = useState(false);
   const [rulerPos, setRulerPos] = useState<Point>({ x: 100, y: 100 });
   const [rulerRot, setRulerRot] = useState(0);
+  const [rulerLength, setRulerLength] = useState(DEFAULT_RULER_LENGTH);
   const [isDraggingRuler, setIsDraggingRuler] = useState(false);
   const [rulerDragOffset, setRulerDragOffset] = useState<Point>({ x: 0, y: 0 });
   const [showGuide, setShowGuide] = useState(true);
   const [showSuccessToast, setShowSuccessToast] = useState(false);
-  const [toastMessage, setToastMessage] = useState('새로운 삼각형 완성! ✨');
+  const [toastMessage, setToastMessage] = useState(DEFAULT_TOAST);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const lastMousePosRef = useRef<Point>({ x: 100, y: 100 });
+  const rulerPosRef = useRef<Point>({ x: 100, y: 100 });
+  const activeConfig = currentActivity ? ACTIVITY_CONFIGS[currentActivity] : null;
 
   const snapToGrid = useCallback((val: number) => Math.round(val / GRID_SIZE) * GRID_SIZE, []);
+
+  const cloneShape = useCallback((shape: Shape, position = shape.position): Shape => ({
+    ...shape,
+    id: createId(),
+    position: { ...position },
+    points: shape.points.map(p => ({ ...p }))
+  }), []);
+
+  const clearTransientInteraction = useCallback(() => {
+    setDrawingPath([]);
+    setIsDrawing(false);
+    setMouseDownPos(null);
+    setHasStartedDragging(false);
+    setDraggingId(null);
+    setDragOffset({ x: 0, y: 0 });
+    setIsDraggingRuler(false);
+    setRulerDragOffset({ x: 0, y: 0 });
+    setContextMenu(null);
+  }, []);
+
+  const saveCurrentWorkspace = useCallback(() => {
+    if (!currentActivity) return;
+    setActivityStates(prev => ({
+      ...prev,
+      [currentActivity]: {
+        mode,
+        shapes,
+        history,
+        selectedId,
+        cutLine,
+        isCutLineSelected,
+        showRuler,
+        rulerPos,
+        rulerRot,
+        rulerLength,
+        showGuide
+      }
+    }));
+  }, [currentActivity, mode, shapes, history, selectedId, cutLine, isCutLineSelected, showRuler, rulerPos, rulerRot, rulerLength, showGuide]);
+
+  const loadActivity = useCallback((activity: ActivityId) => {
+    const workspace = activityStates[activity] ?? createDefaultWorkspace();
+    setCurrentActivity(activity);
+    setMode(activity === 'activity1' && workspace.mode === 'cut' ? 'select' : workspace.mode);
+    setShapes(workspace.shapes);
+    setHistory(workspace.history);
+    setSelectedId(workspace.selectedId);
+    setCutLine(activity === 'activity2' ? workspace.cutLine : null);
+    setIsCutLineSelected(activity === 'activity2' ? workspace.isCutLineSelected : false);
+    setShowRuler(workspace.showRuler);
+    setRulerPos(workspace.rulerPos);
+    rulerPosRef.current = workspace.rulerPos;
+    setRulerRot(workspace.rulerRot);
+    setRulerLength(workspace.rulerLength ?? DEFAULT_RULER_LENGTH);
+    setShowGuide(workspace.showGuide);
+    setToastMessage(DEFAULT_TOAST);
+    setShowSuccessToast(false);
+    clearTransientInteraction();
+  }, [activityStates, clearTransientInteraction]);
+
+  const returnToActivitySelect = useCallback(() => {
+    saveCurrentWorkspace();
+    clearTransientInteraction();
+    setCurrentActivity(null);
+  }, [saveCurrentWorkspace, clearTransientInteraction]);
+
+  const changeMode = useCallback((nextMode: Mode) => {
+    if (currentActivity === 'activity1' && nextMode === 'cut') return;
+    setMode(nextMode);
+    setContextMenu(null);
+    if (nextMode !== 'cut') {
+      setIsCutLineSelected(false);
+    }
+  }, [currentActivity]);
+
+  const showToast = useCallback((message: string, duration = 2000) => {
+    setToastMessage(message);
+    setShowSuccessToast(true);
+    setTimeout(() => setShowSuccessToast(false), duration);
+  }, []);
+
+  const resizeRuler = useCallback((delta: number) => {
+    setRulerLength(prev => Math.max(MIN_RULER_LENGTH, Math.min(MAX_RULER_LENGTH, prev + delta)));
+  }, []);
+
+  const copySelectedShape = useCallback(() => {
+    if (currentActivity !== 'activity1') return;
+    const selectedShape = shapes.find(s => s.id === selectedId);
+    if (!selectedShape) {
+      showToast('복사할 삼각형을 먼저 선택해주세요.');
+      return;
+    }
+    setCopiedShape({
+      ...selectedShape,
+      points: selectedShape.points.map(p => ({ ...p })),
+      position: { ...selectedShape.position }
+    });
+    showToast('선택한 도형을 복사했어요. Ctrl+V로 붙여넣어 보세요.');
+  }, [currentActivity, shapes, selectedId, showToast]);
+
+  const pasteCopiedShape = useCallback((point?: Point) => {
+    if (currentActivity !== 'activity1') return;
+    if (!copiedShape) {
+      showToast('붙여넣을 도형이 없어요. 먼저 Ctrl+C로 복사해 주세요.');
+      return;
+    }
+    const pastePoint = point ?? lastMousePosRef.current;
+    const newShape = cloneShape(copiedShape, pastePoint);
+    addToHistory();
+    setShapes(prev => [...prev, newShape]);
+    setSelectedId(newShape.id);
+    showToast('현재 마우스 위치에 붙여넣었어요.');
+  }, [currentActivity, copiedShape, cloneShape, addToHistory, showToast]);
+
+  const getWorkspacePoint = useCallback((clientX: number, clientY: number): Point | null => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    return { x: clientX - rect.left, y: clientY - rect.top };
+  }, []);
+
+  const openContextMenu = useCallback((e: React.MouseEvent, targetShape?: Shape) => {
+    if (!currentActivity) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const workspacePoint = getWorkspacePoint(e.clientX, e.clientY);
+    if (!workspacePoint) return;
+
+    lastMousePosRef.current = workspacePoint;
+    if (targetShape) {
+      setSelectedId(targetShape.id);
+    }
+
+    const menuWidth = 224;
+    const menuHeight = currentActivity === 'activity1' ? 220 : 172;
+    setContextMenu({
+      x: Math.max(12, Math.min(e.clientX, window.innerWidth - menuWidth - 12)),
+      y: Math.max(12, Math.min(e.clientY, window.innerHeight - menuHeight - 12)),
+      workspacePoint,
+      targetShapeId: targetShape?.id ?? null
+    });
+  }, [currentActivity, getWorkspacePoint]);
 
   // Triangle recognition: Find 3 points that form the largest triangle within the path
   const recognizeTriangle = (path: Point[]): [Point, Point, Point] | null => {
@@ -193,6 +444,48 @@ export default function App() {
     });
   }, [rotatePoint]);
 
+  const snapRulerZeroPoint = useCallback((position: Point): { position: Point; snapped: boolean } => {
+    let bestSnap: { point: Point; distance: number } | null = null;
+
+    shapes.forEach(shape => {
+      const points = getGlobalPoints(shape);
+
+      points.forEach(point => {
+        const distance = getDistance(position, point);
+        if (distance <= RULER_VERTEX_SNAP_DISTANCE && (!bestSnap || distance < bestSnap.distance)) {
+          bestSnap = { point, distance };
+        }
+      });
+
+      points.forEach((start, index) => {
+        const end = points[(index + 1) % points.length];
+        const point = getClosestPointOnSegment(position, start, end);
+        const distance = getDistance(position, point);
+        if (distance <= RULER_EDGE_SNAP_DISTANCE && (!bestSnap || distance < bestSnap.distance)) {
+          bestSnap = { point, distance };
+        }
+      });
+    });
+
+    if (bestSnap) {
+      return {
+        position: {
+          x: bestSnap.point.x,
+          y: bestSnap.point.y
+        },
+        snapped: true
+      };
+    }
+
+    return {
+      position: {
+        x: snapToGrid(position.x),
+        y: snapToGrid(position.y)
+      },
+      snapped: false
+    };
+  }, [getGlobalPoints, shapes, snapToGrid]);
+
   const attemptMerge = useCallback((activeShape: Shape, allShapes: Shape[]) => {
     const others = allShapes.filter(s => s.id !== activeShape.id);
     const g1 = getGlobalPoints(activeShape);
@@ -265,6 +558,7 @@ export default function App() {
   }, [getGlobalPoints, snapToGrid]);
 
   const executeCut = useCallback(() => {
+    if (currentActivity !== 'activity2') return;
     if (!cutLine) return;
 
     // Use selected shape if exists, otherwise find all intersecting shapes
@@ -350,7 +644,7 @@ export default function App() {
           const cx = snapToGrid(points.reduce((acc, p) => acc + p.x, 0) / points.length);
           const cy = snapToGrid(points.reduce((acc, p) => acc + p.y, 0) / points.length);
           return {
-            id: Math.random().toString(36).substr(2, 9),
+            id: createId(),
             points: points.map(p => ({ x: p.x - cx, y: p.y - cy })),
             position: { x: cx, y: cy },
             rotation: 0,
@@ -372,22 +666,24 @@ export default function App() {
       setShowSuccessToast(true);
       setTimeout(() => setShowSuccessToast(false), 2000);
     }
-  }, [cutLine, selectedId, shapes, snapToGrid, addToHistory, getGlobalPoints]);
+  }, [currentActivity, cutLine, selectedId, shapes, snapToGrid, addToHistory, getGlobalPoints]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button === 2) return;
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
+    const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    lastMousePosRef.current = pos;
+    setContextMenu(null);
 
     if (mode === 'draw') {
       setIsDrawing(true);
-      const newPoint = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-      setDrawingPath([newPoint]);
+      setDrawingPath([pos]);
       setSelectedId(null);
       setCutLine(null);
-    } else if (mode === 'cut') {
+    } else if (mode === 'cut' && currentActivity === 'activity2') {
       setIsDrawing(true);
       setIsCutLineSelected(false);
-      const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       setCutLine({ start: { x: snapToGrid(pos.x), y: snapToGrid(pos.y) }, end: { x: snapToGrid(pos.x), y: snapToGrid(pos.y) } });
     } else {
       setSelectedId(null);
@@ -400,6 +696,7 @@ export default function App() {
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
     const currentPoint = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    lastMousePosRef.current = currentPoint;
 
     if (mouseDownPos && !hasStartedDragging) {
       const dist = Math.sqrt(Math.pow(currentPoint.x - mouseDownPos.x, 2) + Math.pow(currentPoint.y - mouseDownPos.y, 2));
@@ -412,14 +709,16 @@ export default function App() {
 
     if (isDrawing) {
       if (mode === 'draw') setDrawingPath(prev => [...prev, currentPoint]);
-      if (mode === 'cut') setCutLine(prev => prev ? { ...prev, end: { x: snapToGrid(currentPoint.x), y: snapToGrid(currentPoint.y) } } : null);
+      if (mode === 'cut' && currentActivity === 'activity2') setCutLine(prev => prev ? { ...prev, end: { x: snapToGrid(currentPoint.x), y: snapToGrid(currentPoint.y) } } : null);
     }
 
     if (hasStartedDragging && isDraggingRuler) {
-      setRulerPos({
+      const nextRulerPos = {
         x: currentPoint.x - rulerDragOffset.x,
         y: currentPoint.y - rulerDragOffset.y
-      });
+      };
+      rulerPosRef.current = nextRulerPos;
+      setRulerPos(nextRulerPos);
     }
 
     if (hasStartedDragging && draggingId && mode === 'select') {
@@ -450,7 +749,7 @@ export default function App() {
           ];
 
           const newShape: Shape = {
-            id: Math.random().toString(36).substr(2, 9),
+            id: createId(),
             points: relativePoints,
             position: { x: cx, y: cy },
             rotation: 0,
@@ -469,7 +768,12 @@ export default function App() {
 
     if (isDraggingRuler) {
       setIsDraggingRuler(false);
-      setRulerPos(prev => ({ x: snapToGrid(prev.x), y: snapToGrid(prev.y) }));
+      const snapped = snapRulerZeroPoint(rulerPosRef.current);
+      rulerPosRef.current = snapped.position;
+      setRulerPos(snapped.position);
+      if (snapped.snapped) {
+        showToast('자 0점이 가까운 도형에 맞춰졌어요.', 1400);
+      }
     }
 
     if (draggingId) {
@@ -483,10 +787,13 @@ export default function App() {
   };
 
   const handleTriangleMouseDown = (e: React.MouseEvent, t: Shape) => {
+    if (e.button === 2) return;
     if (mode === 'select') {
       e.stopPropagation();
       const rect = containerRef.current?.getBoundingClientRect();
       const pos = { x: e.clientX - (rect?.left || 0), y: e.clientY - (rect?.top || 0) };
+      lastMousePosRef.current = pos;
+      setContextMenu(null);
       setMouseDownPos(pos);
       setHasStartedDragging(false);
       
@@ -521,6 +828,21 @@ export default function App() {
       // Small step for fine control, larger step for grid snapping
       const step = e.shiftKey ? GRID_SIZE : 2;
 
+      if (e.key === 'Escape') {
+        setContextMenu(null);
+        setIsCutLineSelected(false);
+        return;
+      }
+      if (currentActivity === 'activity1' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+        e.preventDefault();
+        copySelectedShape();
+        return;
+      }
+      if (currentActivity === 'activity1' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+        e.preventDefault();
+        pasteCopiedShape(lastMousePosRef.current);
+        return;
+      }
       if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected();
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault();
@@ -531,7 +853,7 @@ export default function App() {
         else if (showRuler) setRulerRot(prev => (prev + 15) % 360);
       }
       if (e.key === 'Enter') {
-        if (cutLine) executeCut();
+        if (currentActivity === 'activity2' && cutLine) executeCut();
         else setSelectedId(null);
       }
 
@@ -554,7 +876,7 @@ export default function App() {
             }
             return s;
           }));
-        } else if (isCutLineSelected && cutLine) {
+        } else if (currentActivity === 'activity2' && isCutLineSelected && cutLine) {
           setCutLine(prev => prev ? {
             start: {
               x: e.shiftKey ? snapToGrid(prev.start.x + dx) : prev.start.x + dx,
@@ -570,7 +892,7 @@ export default function App() {
             x: e.shiftKey ? snapToGrid(prev.x + dx) : prev.x + dx,
             y: e.shiftKey ? snapToGrid(prev.y + dy) : prev.y + dy
           }));
-        } else if (mode === 'cut' && cutLine) {
+        } else if (currentActivity === 'activity2' && mode === 'cut' && cutLine) {
           setCutLine(prev => prev ? {
             start: {
               x: e.shiftKey ? snapToGrid(prev.start.x + dx) : prev.start.x + dx,
@@ -586,7 +908,61 @@ export default function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [deleteSelected, rotateSelected, mode, executeCut, selectedId, showRuler, snapToGrid, cutLine, isCutLineSelected]);
+  }, [currentActivity, copySelectedShape, pasteCopiedShape, deleteSelected, rotateSelected, mode, executeCut, selectedId, showRuler, snapToGrid, cutLine, isCutLineSelected, undo]);
+
+  useEffect(() => {
+    rulerPosRef.current = rulerPos;
+  }, [rulerPos]);
+
+  useEffect(() => {
+    const closeContextMenu = () => setContextMenu(null);
+    window.addEventListener('click', closeContextMenu);
+    return () => window.removeEventListener('click', closeContextMenu);
+  }, []);
+
+  if (!currentActivity) {
+    return (
+      <div className="min-h-screen grid-bg bg-orange-50 flex flex-col items-center justify-center p-6 font-jua text-slate-800">
+        <div className="w-full max-w-5xl">
+          <div className="mb-8 text-center">
+            <div className="mx-auto mb-4 w-14 h-14 bg-orange-400 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-orange-200">
+              <svg viewBox="0 0 24 24" className="w-8 h-8 fill-current">
+                <path d="M12 4L4 20h16L12 4z" />
+              </svg>
+            </div>
+            <h1 className="text-3xl font-bold text-slate-800">삼각형의 넓이 탐구</h1>
+            <p className="mt-2 text-slate-500 font-sans">활동을 선택하고 삼각형의 넓이를 구하는 방법을 찾아봅시다.</p>
+          </div>
+
+          <div className="grid gap-5 md:grid-cols-2">
+            {Object.values(ACTIVITY_CONFIGS).map(config => (
+              <button
+                key={config.id}
+                onClick={() => loadActivity(config.id)}
+                className="group text-left bg-white/90 backdrop-blur-sm border border-orange-100 rounded-2xl p-7 shadow-xl shadow-orange-100/60 hover:-translate-y-1 hover:shadow-2xl hover:border-orange-300 transition-all"
+              >
+                <div className="flex items-start gap-4">
+                  <div className="w-12 h-12 bg-orange-100 text-orange-600 rounded-xl flex items-center justify-center shrink-0 group-hover:bg-orange-400 group-hover:text-white transition-colors">
+                    {config.id === 'activity1' ? <Copy className="w-6 h-6" /> : <Scissors className="w-6 h-6" />}
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold text-slate-800">{config.title}</h2>
+                    <p className="mt-1 text-orange-600">{config.subtitle}</p>
+                    <p className="mt-4 text-base leading-relaxed text-slate-500 font-sans">{config.cardDescription}</p>
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const selectedActivityConfig = activeConfig as ActivityConfig;
+  const selectedShape = selectedId ? shapes.find(s => s.id === selectedId) : null;
+  const canUseCopy = currentActivity === 'activity1' && Boolean(selectedShape);
+  const canUsePaste = currentActivity === 'activity1' && Boolean(copiedShape);
 
   return (
     <div className="flex flex-col h-screen select-none font-jua">
@@ -599,14 +975,14 @@ export default function App() {
             </svg>
           </div>
           <div>
-            <h1 className="text-xl font-bold text-slate-800">삼각형의 넓이 탐구</h1>
-            <p className="text-xs text-slate-500 font-medium font-sans">활동 2: 잘라서 모양 만들기</p>
+            <h1 className="text-xl font-bold text-slate-800">{selectedActivityConfig.title}</h1>
+            <p className="text-xs text-slate-500 font-medium font-sans">{selectedActivityConfig.subtitle}</p>
           </div>
         </div>
 
         <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-2xl">
           <button
-            onClick={() => setMode('select')}
+            onClick={() => changeMode('select')}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm transition-all ${
               mode === 'select' ? 'bg-white shadow-sm text-orange-600' : 'text-slate-500 hover:bg-white/50'
             }`}
@@ -615,7 +991,7 @@ export default function App() {
             선택 & 이동
           </button>
           <button
-            onClick={() => setMode('draw')}
+            onClick={() => changeMode('draw')}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm transition-all ${
               mode === 'draw' ? 'bg-white shadow-sm text-orange-600' : 'text-slate-500 hover:bg-white/50'
             }`}
@@ -623,24 +999,22 @@ export default function App() {
             <Pencil className="w-4 h-4" />
             삼각형 그리기
           </button>
-          <button
-            onClick={() => {
-              setMode('cut');
-              if (shapes.length > 0 && !selectedId) {
-                setToastMessage('자를 삼각형을 먼저 선택해주세요!');
-                setShowSuccessToast(true);
-                setTimeout(() => setShowSuccessToast(false), 2000);
-              }
-            }}
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm transition-all ${
-              mode === 'cut' ? 'bg-white shadow-sm text-orange-600' : 'text-slate-500 hover:bg-white/50'
-            }`}
-          >
-            <svg viewBox="0 0 24 24" className="w-4 h-4 stroke-current fill-none" strokeWidth="2">
-              <path d="M6 3L20 12L6 21M6 3L6 21" />
-            </svg>
-            자르기
-          </button>
+          {currentActivity === 'activity2' && (
+            <button
+              onClick={() => {
+                changeMode('cut');
+                if (shapes.length > 0 && !selectedId) {
+                  showToast('자를 삼각형을 먼저 선택해주세요!');
+                }
+              }}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm transition-all ${
+                mode === 'cut' ? 'bg-white shadow-sm text-orange-600' : 'text-slate-500 hover:bg-white/50'
+              }`}
+            >
+              <Scissors className="w-4 h-4" />
+              자르기
+            </button>
+          )}
           <button
             onClick={() => setShowRuler(!showRuler)}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm transition-all ${
@@ -653,6 +1027,13 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={returnToActivitySelect}
+            className="px-3 py-2 hover:bg-orange-50 rounded-xl text-orange-600 text-sm transition-all flex items-center gap-1 border border-orange-100 bg-white"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            활동 선택
+          </button>
           {shapes.length > 0 && (
             <>
               <button
@@ -672,6 +1053,9 @@ export default function App() {
                   if (confirm('모든 도형을 삭제할까요?')) {
                     addToHistory();
                     setShapes([]);
+                    setSelectedId(null);
+                    setCutLine(null);
+                    setIsCutLineSelected(false);
                   }
                 }}
                 className="px-3 py-2 hover:bg-red-50 rounded-xl text-red-500 text-sm transition-all flex items-center gap-1"
@@ -712,12 +1096,13 @@ export default function App() {
       <main
         ref={containerRef}
         className={`relative flex-1 grid-bg overflow-hidden transition-colors ${
-          mode === 'draw' ? 'cursor-crosshair' : mode === 'cut' ? 'cursor-nwse-resize' : 'cursor-default'
+          mode === 'draw' ? 'cursor-crosshair' : currentActivity === 'activity2' && mode === 'cut' ? 'cursor-nwse-resize' : 'cursor-default'
         }`}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
+        onContextMenu={openContextMenu}
       >
         {/* Success Toast / Pop animation */}
         <AnimatePresence>
@@ -749,7 +1134,7 @@ export default function App() {
               strokeDasharray="10 10"
             />
           )}
-          {cutLine && (
+          {currentActivity === 'activity2' && cutLine && (
             <g className="cursor-pointer pointer-events-auto">
               {/* Hit area for easier selection */}
               <line
@@ -762,7 +1147,7 @@ export default function App() {
                   e.stopPropagation();
                   setIsCutLineSelected(true);
                   setSelectedId(null);
-                  setMode('cut');
+                  changeMode('cut');
                   setToastMessage('점선이 선택되었습니다. 📏');
                   setShowSuccessToast(true);
                   setTimeout(() => setShowSuccessToast(false), 1500);
@@ -811,9 +1196,9 @@ export default function App() {
               transformOrigin: '0 0',
             }}
           >
-            <div className="relative pointer-events-auto" style={{ width: 0, height: 0 }}>
+            <div className="relative pointer-events-none" style={{ width: 0, height: 0 }}>
               <svg
-                className={`triangle-svg overflow-visible cursor-grab active:cursor-grabbing transition-all ${
+                className={`triangle-svg overflow-visible pointer-events-none transition-all ${
                   selectedId === t.id ? 'opacity-100' : 'opacity-90'
                 }`}
                 width="800"
@@ -824,7 +1209,6 @@ export default function App() {
                   left: -400, 
                   top: -400,
                 }}
-                onMouseDown={(e) => handleTriangleMouseDown(e, t)}
               >
                 <polygon
                   points={t.points.map(p => `${p.x},${p.y}`).join(' ')}
@@ -832,8 +1216,10 @@ export default function App() {
                   stroke={selectedId === t.id ? '#000000' : 'white'}
                   strokeWidth="3"
                   strokeLinejoin="round"
-                  className="transition-all"
-                  style={{ filter: 'drop-shadow(0 4px 10px rgba(0,0,0,0.15))' }}
+                  className="pointer-events-auto cursor-grab active:cursor-grabbing transition-all"
+                  style={{ filter: 'drop-shadow(0 4px 10px rgba(0,0,0,0.15))', pointerEvents: 'visiblePainted' }}
+                  onMouseDown={(e) => handleTriangleMouseDown(e, t)}
+                  onContextMenu={(e) => openContextMenu(e, t)}
                 />
 
                 {/* Selection Indicator / Anchor */}
@@ -845,6 +1231,9 @@ export default function App() {
                     fill="white"
                     stroke="#000000"
                     strokeWidth="3"
+                    className="pointer-events-auto cursor-grab active:cursor-grabbing"
+                    onMouseDown={(e) => handleTriangleMouseDown(e, t)}
+                    onContextMenu={(e) => openContextMenu(e, t)}
                   />
                 )}
               </svg>
@@ -860,6 +1249,7 @@ export default function App() {
               animate={{ opacity: 1, scale: 1, x: rulerPos.x, y: rulerPos.y, rotate: rulerRot }}
               exit={{ opacity: 0, scale: 0.8 }}
               className="absolute left-0 top-0 z-30 cursor-grab active:cursor-grabbing group"
+              style={{ transformOrigin: '0 0' }}
               onMouseDown={(e) => {
                 e.stopPropagation();
                 const rect = containerRef.current?.getBoundingClientRect();
@@ -874,30 +1264,61 @@ export default function App() {
               }}
             >
               <div className="relative bg-amber-100/60 backdrop-blur-md border-2 border-amber-400 rounded-sm h-12 flex shadow-xl overflow-hidden" 
-                   style={{ width: `${30 * 15}px`, height: '50px' }}> {/* 15cm ruler */}
+                   style={{ width: `${GRID_SIZE * rulerLength}px`, height: '50px' }}>
                 {/* CM Markings */}
-                {Array.from({ length: 16 }).map((_, i) => (
-                  <div key={i} className="absolute h-full border-l border-amber-500/50" style={{ left: `${i * 30}px` }}>
+                {Array.from({ length: rulerLength + 1 }).map((_, i) => (
+                  <div key={i} className="absolute h-full border-l border-amber-500/50" style={{ left: `${i * GRID_SIZE}px` }}>
                     <div className="h-4 border-l-2 border-amber-600"></div>
-                    <span className="text-[10px] mt-4 ml-1 text-amber-800 font-sans font-bold">{i}</span>
-                    {i < 15 && (
+                    <span className="text-[11px] mt-4 ml-1 text-amber-800 font-sans font-bold">{i}</span>
+                    {i < rulerLength && (
                        <div className="absolute h-2 border-l border-amber-600/50 top-0" style={{ left: '15px' }}></div>
                     )}
                   </div>
                 ))}
-                <div className="absolute bottom-1 right-2 text-[8px] text-amber-900 uppercase font-bold tracking-widest opacity-30">1cm = 1grid</div>
+                <div className="absolute bottom-1 right-2 text-[9px] text-amber-900 uppercase font-bold tracking-widest opacity-30">1cm = 1grid</div>
               </div>
               
-              {/* Rotate button on ruler */}
-              <button
-                className="absolute -right-10 top-1/2 -translate-y-1/2 bg-white border-2 border-amber-400 p-1.5 rounded-full shadow-lg text-amber-600 hover:scale-110 transition-transform"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setRulerRot(prev => (prev + 15) % 360);
-                }}
-              >
-                <RotateCcw className="w-4 h-4" />
-              </button>
+              <div className="absolute -right-11 top-1/2 -translate-y-1/2 flex flex-col gap-1.5">
+                <button
+                  className={`w-8 h-8 bg-white border-2 border-amber-400 rounded-full shadow-lg text-amber-600 flex items-center justify-center transition-transform ${
+                    rulerLength >= MAX_RULER_LENGTH ? 'opacity-40 cursor-not-allowed' : 'hover:scale-110'
+                  }`}
+                  title="자 길이 늘리기"
+                  disabled={rulerLength >= MAX_RULER_LENGTH}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    resizeRuler(1);
+                  }}
+                >
+                  <Plus className="w-4 h-4" />
+                </button>
+                <button
+                  className="w-8 h-8 bg-white border-2 border-amber-400 rounded-full shadow-lg text-amber-600 flex items-center justify-center hover:scale-110 transition-transform"
+                  title="자 회전"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setRulerRot(prev => (prev + 15) % 360);
+                  }}
+                >
+                  <RotateCcw className="w-4 h-4" />
+                </button>
+                <button
+                  className={`w-8 h-8 bg-white border-2 border-amber-400 rounded-full shadow-lg text-amber-600 flex items-center justify-center transition-transform ${
+                    rulerLength <= MIN_RULER_LENGTH ? 'opacity-40 cursor-not-allowed' : 'hover:scale-110'
+                  }`}
+                  title="자 길이 줄이기"
+                  disabled={rulerLength <= MIN_RULER_LENGTH}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    resizeRuler(-1);
+                  }}
+                >
+                  <Minus className="w-4 h-4" />
+                </button>
+              </div>
             </motion.div>
           )}
         </AnimatePresence>
@@ -928,7 +1349,7 @@ export default function App() {
               className="absolute bottom-6 left-6 w-80 bg-white rounded-3xl p-6 shadow-2xl z-20 border border-slate-100"
             >
               <div className="flex justify-between items-start mb-4">
-                <h3 className="text-lg font-bold text-orange-600">선생님의 팁 💡</h3>
+                <h3 className="text-lg font-bold text-orange-600">{selectedActivityConfig.guideTitle} 💡</h3>
                 <button
                   onClick={() => setShowGuide(false)}
                   className="text-slate-400 hover:text-slate-600 font-sans"
@@ -937,18 +1358,12 @@ export default function App() {
                 </button>
               </div>
               <ul className="space-y-4 text-sm text-slate-600 leading-relaxed font-jua">
-                <li className="flex gap-3">
-                  <span className="w-6 h-6 bg-orange-100 text-orange-600 rounded-full flex items-center justify-center shrink-0 text-sm">1</span>
-                  <span className="text-base">삼각형을 그린 후 <b className="text-slate-800">자르기 도구</b>로 점선을 긋고 <b className="text-orange-500">Enter</b>를 눌러주세요.</span>
-                </li>
-                <li className="flex gap-3">
-                  <span className="w-6 h-6 bg-orange-100 text-orange-600 rounded-full flex items-center justify-center shrink-0 text-sm">2</span>
-                  <span className="text-base">잘려진 조각을 드래그해서 옮기고, <b className="text-slate-800">R 키</b>로 회전시켜 합쳐보세요.</span>
-                </li>
-                <li className="flex gap-3">
-                  <span className="w-6 h-6 bg-orange-100 text-orange-600 rounded-full flex items-center justify-center shrink-0 text-sm">3</span>
-                  <span className="text-base">삼각형을 잘라서 <b className="text-orange-500">새로운 모양</b>으로 만들어보자!</span>
-                </li>
+                {selectedActivityConfig.guideSteps.map((step, index) => (
+                  <li key={step} className="flex gap-3">
+                    <span className="w-6 h-6 bg-orange-100 text-orange-600 rounded-full flex items-center justify-center shrink-0 text-sm">{index + 1}</span>
+                    <span className="text-base">{step}</span>
+                  </li>
+                ))}
               </ul>
             </motion.div>
           )}
@@ -964,12 +1379,28 @@ export default function App() {
           <span className="flex items-center gap-1">
             <MousePointer className="w-3 h-3" /> Shift + 방향키: 칸 단위 이동
           </span>
-          <span className="flex items-center gap-1">
-            <MousePointer className="w-3 h-3" /> Enter: 자르기 / 선택 해제
-          </span>
-          <span className="flex items-center gap-1">
-            <MousePointer className="w-3 h-3" /> 더블클릭: 점선 선택
-          </span>
+          {currentActivity === 'activity1' ? (
+            <>
+              <span className="flex items-center gap-1">
+                <Copy className="w-3 h-3" /> Ctrl+C: 복사
+              </span>
+              <span className="flex items-center gap-1">
+                <ClipboardPaste className="w-3 h-3" /> Ctrl+V: 마우스 위치에 붙여넣기
+              </span>
+              <span className="flex items-center gap-1">
+                <MousePointer className="w-3 h-3" /> 우클릭: 활동 메뉴
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="flex items-center gap-1">
+                <MousePointer className="w-3 h-3" /> Enter: 자르기 / 선택 해제
+              </span>
+              <span className="flex items-center gap-1">
+                <MousePointer className="w-3 h-3" /> 더블클릭: 점선 선택
+              </span>
+            </>
+          )}
           <span className="flex items-center gap-1">
             <RotateCcw className="w-3 h-3" /> R키: 회전
           </span>
@@ -978,9 +1409,82 @@ export default function App() {
           </span>
         </div>
         <div>
-          5학년 수학 삼각형의 넓이 - {shapes.length}개의 도형 활성화됨
+          5학년 수학 {selectedActivityConfig.subtitle} - {shapes.length}개의 도형 활성화됨
         </div>
       </footer>
+
+      <AnimatePresence>
+        {contextMenu && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.96, y: -4 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: -4 }}
+            transition={{ duration: 0.12 }}
+            className="fixed z-[100] w-56 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/15 p-2 font-jua"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => changeMode('draw')}
+              className="w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-slate-700 hover:bg-orange-50 hover:text-orange-600 transition-colors"
+            >
+              <Pencil className="w-4 h-4" />
+              그리기
+            </button>
+            <button
+              onClick={() => changeMode('select')}
+              className="w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-slate-700 hover:bg-orange-50 hover:text-orange-600 transition-colors"
+            >
+              <MousePointer2 className="w-4 h-4" />
+              선택하기
+            </button>
+
+            {currentActivity === 'activity1' ? (
+              <>
+                <div className="my-1 border-t border-slate-100" />
+                <button
+                  onClick={() => {
+                    copySelectedShape();
+                    setContextMenu(null);
+                  }}
+                  disabled={!canUseCopy}
+                  className={`w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-colors ${
+                    canUseCopy ? 'text-slate-700 hover:bg-orange-50 hover:text-orange-600' : 'text-slate-300 cursor-not-allowed'
+                  }`}
+                >
+                  <Copy className="w-4 h-4" />
+                  복사
+                </button>
+                <button
+                  onClick={() => {
+                    pasteCopiedShape(contextMenu.workspacePoint);
+                    setContextMenu(null);
+                  }}
+                  disabled={!canUsePaste}
+                  className={`w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-colors ${
+                    canUsePaste ? 'text-slate-700 hover:bg-orange-50 hover:text-orange-600' : 'text-slate-300 cursor-not-allowed'
+                  }`}
+                >
+                  <ClipboardPaste className="w-4 h-4" />
+                  붙여넣기
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="my-1 border-t border-slate-100" />
+                <button
+                  onClick={() => changeMode('cut')}
+                  className="w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-slate-700 hover:bg-orange-50 hover:text-orange-600 transition-colors"
+                >
+                  <Scissors className="w-4 h-4" />
+                  자르기
+                </button>
+              </>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
