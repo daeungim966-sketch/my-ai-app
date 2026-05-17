@@ -1,0 +1,21 @@
+@import url('https://fonts.googleapis.com/css2?family=Jua&family=Nanum+Pen+Script&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-jua: "Jua", sans-serif;
+  --font-pen: "Nanum Pen Script", cursive;
+}
+
+body {
+  @apply bg-orange-50 text-slate-800 antialiased overflow-hidden;
+  font-family: var(--font-jua);
+}
+
+.triangle-svg {
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.1));
+}
+
+.grid-bg {
+  background-image: radial-gradient(#cbd5e1 1px, transparent 1px);
+  background-size: 30px 30px;
+}

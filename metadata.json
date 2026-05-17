@@ -1,0 +1,6 @@
+{
+  "name": "삼각형의 넓이 탐구 도구",
+  "description": "삼각형을 직접 그려보고 복사 및 이동을 통해 여러 가지 모양을 만들어보며 삼각형의 넓이를 탐구하는 수학 교구입니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
